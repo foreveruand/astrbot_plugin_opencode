@@ -2,6 +2,7 @@
 
 让 AstrBot 对接 [OpenCode](https://github.com/anomalyco/opencode)，通过自然语言远程操控电脑。
 本项目使用 OpenCode 构建。
+
 使用过程中若有问题或宝贵意见，欢迎发布issues、提交PR！
 
 ## 功能特性
