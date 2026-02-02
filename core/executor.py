@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import locale
 import os
 import shutil
 from typing import List, Tuple
@@ -184,8 +185,10 @@ class CommandExecutor:
                     pass
                 return "❌ 执行超时 (30s)"
 
-            output = stdout.decode("utf-8", errors="replace").strip()
-            error = stderr.decode("utf-8", errors="replace").strip()
+            # 使用系统默认编码解码（Windows中文版=GBK, 英文版=CP1252, Linux=UTF-8等）
+            encoding = locale.getpreferredencoding(False)
+            output = stdout.decode(encoding, errors="replace").strip()
+            error = stderr.decode(encoding, errors="replace").strip()
 
             resp = []
             if output:
