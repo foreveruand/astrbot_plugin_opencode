@@ -6,9 +6,12 @@ import asyncio
 import os
 from datetime import datetime
 
+from pathlib import Path
+
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.api.all import *
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
 from astrbot.api.message_components import File
@@ -35,9 +38,9 @@ class OpenCodePlugin(Star):
         self.config = config
         self.logger = logger
 
-        # 基础数据目录
-        self.base_data_dir = os.path.abspath(
-            os.path.join("data", "plugin_data", "astrbot_plugin_opencode")
+        # 基础数据目录（使用框架 API 获取，兼容不同部署环境）
+        self.base_data_dir = str(
+            Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_opencode"
         )
 
         # 初始化各个核心模块
