@@ -15,6 +15,38 @@
                 "default": "opencode",
                 "hint": "如果已添加到环境变量，保持默认即可；否则请输入完整路径"
             },
+            "connection_mode": {
+                "description": "连接模式",
+                "type": "string",
+                "options": ["local", "remote"],
+                "default": "local",
+                "hint": "local=本地 Shell 模式（AstrBot 与 OpenCode 在同机）；remote=服务器模式（连接远程 OpenCode Server）。"
+            },
+            "remote_server_url": {
+                "description": "远程 OpenCode Server 地址",
+                "type": "string",
+                "default": "",
+                "hint": "仅 remote 模式生效，例如 http://127.0.0.1:4096 或 https://your-server.com"
+            },
+            "remote_username": {
+                "description": "远程 Basic Auth 用户名",
+                "type": "string",
+                "default": "opencode",
+                "hint": "仅 remote 模式生效。若服务器未启用认证，可保持默认。"
+            },
+            "remote_password": {
+                "description": "远程 Basic Auth 密码",
+                "type": "string",
+                "default": "",
+                "obvious_hint": true,
+                "hint": "仅 remote 模式生效。若服务器配置了 OPENCODE_SERVER_PASSWORD，请填入对应密码。"
+            },
+            "remote_timeout": {
+                "description": "远程请求超时(秒)",
+                "type": "int",
+                "default": 300,
+                "hint": "仅 remote 模式生效。用于连接 OpenCode Server 的 HTTP 请求超时。"
+            },
             "work_dir": {
                 "description": "默认工作目录",
                 "type": "string",

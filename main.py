@@ -4,6 +4,7 @@ AstrBot OpenCode 插件 - 让 AstrBot 对接 OpenCode，通过自然语言远程
 
 import asyncio
 import os
+import re
 from datetime import datetime
 
 from pathlib import Path
@@ -29,7 +30,7 @@ from .core.output import OutputProcessor
     "astrbot_plugin_opencode",
     "singularity2000",
     "让 AstrBot 对接 OpenCode，通过自然语言远程指挥电脑干活。使用此插件，意味着你已知晓相关风险。",
-    "1.1.0",
+    "1.2.0",
     "https://github.com/singularity2000/astrbot_plugin_opencode",
 )
 class OpenCodePlugin(Star):
@@ -55,6 +56,53 @@ class OpenCodePlugin(Star):
         self.session_mgr.set_record_workdir_callback(self.storage_mgr.record_workdir)
         self.storage_mgr.set_get_workdirs_callback(self.session_mgr.get_all_workdirs)
         self.security.set_load_history_callback(self.storage_mgr.load_workdir_history)
+
+    def _render_exec_status(self, session) -> str:
+        """根据运行模式渲染执行中提示"""
+        if self.executor.is_remote_mode():
+            return f"🚀 执行中... (服务器远程模式)\n📦 本地缓存目录: {session.work_dir}"
+        return f"🚀 执行中... (本地模式)\n📂 工作目录: {session.work_dir}"
+
+    def _find_local_path_refs(self, text: str) -> list[str]:
+        """从文本中提取疑似本地路径引用（用于 remote 模式保护）"""
+        if not text:
+            return []
+
+        findings = []
+        patterns = [
+            r"[A-Za-z]:\\[^\s\"']+",  # Windows 绝对路径
+            r"/(?:[^\s\"']+/)+[^\s\"']*",  # Unix 风格绝对路径
+        ]
+
+        for pattern in patterns:
+            for match in re.findall(pattern, text):
+                findings.append(match)
+
+        # downloaded 目录是此插件最常见的本地资源路径
+        if "downloaded" in text.lower():
+            findings.append("<downloaded-resource>")
+
+        # 去重并限制长度，避免提示过长
+        deduped = []
+        for item in findings:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped[:3]
+
+    def _remote_input_guard_message(self, local_refs: list[str]) -> str:
+        refs = (
+            "\n".join([f"- {r}" for r in local_refs])
+            if local_refs
+            else "- (未识别具体路径)"
+        )
+        return (
+            "⚠️ 当前为服务器远程模式，检测到本地路径/本地缓存资源引用，远端 OpenCode 无法直接访问这些文件。\n\n"
+            f"检测到的本地引用：\n{refs}\n\n"
+            "建议：\n"
+            "1. 改为纯文本描述任务；\n"
+            "2. 先把文件放到远端服务器可访问路径后再让 OpenCode 处理；\n"
+            "3. 需要直接操作本机文件时，请将 connection_mode 切换为 local。"
+        )
 
     async def initialize(self):
         """插件初始化"""
@@ -86,10 +134,22 @@ class OpenCodePlugin(Star):
 
         # 启动自动清理任务
         self.storage_mgr.start_auto_clean_task()
-        self.logger.info("OpenCode Plugin initialized.")
+
+        # 运行模式健康检查
+        ok, detail = await self.executor.health_check()
+        mode_text = "服务器远程模式" if self.executor.is_remote_mode() else "本地模式"
+        if ok:
+            self.logger.info(
+                f"OpenCode Plugin initialized. mode={mode_text}, detail={detail}"
+            )
+        else:
+            self.logger.warning(
+                f"OpenCode Plugin initialized with warning. mode={mode_text}, detail={detail}"
+            )
 
     async def terminate(self):
         """插件卸载/停用时的清理"""
+        await self.executor.close()
         await self.storage_mgr.stop_auto_clean_task()
         self.logger.info("OpenCode Plugin terminated.")
 
@@ -118,6 +178,12 @@ class OpenCodePlugin(Star):
         if not final_message:
             yield event.plain_result("请输入任务、发送图片或引用消息。")
             return
+
+        if self.executor.is_remote_mode():
+            local_refs = self._find_local_path_refs(final_message)
+            if local_refs:
+                yield event.plain_result(self._remote_input_guard_message(local_refs))
+                return
 
         # 获取超时配置
         timeout = self.config.get("basic_config", {}).get("confirm_timeout", 30)
@@ -152,13 +218,13 @@ class OpenCodePlugin(Star):
                 yield event.plain_result("已取消")
                 return
 
-            yield event.plain_result(f"🚀 执行中...\n📂 {session.work_dir}")
+            yield event.plain_result(self._render_exec_status(session))
             output = await self.executor.run_opencode(final_message, session)
             res = await self.output_proc.parse_output(output, event, session)
             yield event.chain_result(res)
             return
 
-        yield event.plain_result(f"🚀 执行中...\n📂 {session.work_dir}")
+        yield event.plain_result(self._render_exec_status(session))
         output = await self.executor.run_opencode(final_message, session)
         result_chain = await self.output_proc.parse_output(output, event, session)
         yield event.chain_result(result_chain)
@@ -176,6 +242,12 @@ class OpenCodePlugin(Star):
 
         if not actual_cmd:
             yield event.plain_result("请输入要执行的 Shell 命令。")
+            return
+
+        if self.executor.is_remote_mode():
+            yield event.plain_result(
+                "❌ 当前为服务器远程模式，已禁用 /oc-shell。本地 Shell 仅在本地模式可用。"
+            )
             return
 
         timeout = self.config.get("basic_config", {}).get("confirm_timeout", 30)
@@ -337,9 +409,13 @@ class OpenCodePlugin(Star):
 
         session = self.session_mgr.get_or_create_session(sender_id, work_dir)
         proxy_info = session.env.get("http_proxy", "无")
+        mode_hint = "服务器远程模式" if self.executor.is_remote_mode() else "本地模式"
+        work_dir_label = (
+            "本地缓存目录" if self.executor.is_remote_mode() else "工作目录"
+        )
         await event.send(
             event.plain_result(
-                f"✅ 已启动 OpenCode 新会话\n📂 工作目录: {session.work_dir}\n🌐 代理环境: {proxy_info}"
+                f"✅ 已启动 OpenCode 新会话\n🔌 运行模式: {mode_hint}\n📂 {work_dir_label}: {session.work_dir}\n🌐 代理环境: {proxy_info}"
             )
         )
 
@@ -499,6 +575,14 @@ class OpenCodePlugin(Star):
             event, session, task_description
         )
 
+        if self.executor.is_remote_mode():
+            local_refs = self._find_local_path_refs(final_task)
+            if local_refs:
+                await event.send(
+                    event.plain_result(self._remote_input_guard_message(local_refs))
+                )
+                return
+
         # 敏感操作需要用户确认
         if self.security.is_destructive(final_task):
             timeout = self.config.get("basic_config", {}).get("confirm_timeout", 30)
@@ -534,7 +618,7 @@ class OpenCodePlugin(Star):
                 return
 
         # 发送"执行中"状态，然后在后台执行，避免框架 60s 超时
-        await event.send(event.plain_result(f"🚀 执行中...\n📂 {session.work_dir}"))
+        await event.send(event.plain_result(self._render_exec_status(session)))
 
         # 保存主动推送所需的信息
         umo = event.unified_msg_origin

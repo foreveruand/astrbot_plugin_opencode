@@ -7,7 +7,9 @@ import json
 import locale
 import os
 import shutil
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+
+import httpx
 
 from astrbot.api import logger
 
@@ -20,6 +22,106 @@ class CommandExecutor:
     def __init__(self, config: dict):
         self.config = config
         self.logger = logger
+        self._remote_client: Optional[httpx.AsyncClient] = None
+
+    def _get_basic_config(self) -> dict:
+        return self.config.get("basic_config", {})
+
+    def _get_connection_mode(self) -> str:
+        mode = self._get_basic_config().get("connection_mode", "local")
+        return str(mode).strip().lower() or "local"
+
+    def is_remote_mode(self) -> bool:
+        return self._get_connection_mode() == "remote"
+
+    async def _get_remote_client(self) -> httpx.AsyncClient:
+        if self._remote_client and not self._remote_client.is_closed:
+            return self._remote_client
+
+        basic_cfg = self._get_basic_config()
+        server_url = str(basic_cfg.get("remote_server_url", "")).strip()
+        if not server_url:
+            raise ValueError(
+                "未配置 remote_server_url。请在配置中填写 OpenCode Server 地址。"
+            )
+
+        timeout = int(basic_cfg.get("remote_timeout", 300))
+        username = str(basic_cfg.get("remote_username", "opencode")).strip()
+        password = str(basic_cfg.get("remote_password", ""))
+        auth = (username, password) if password else None
+
+        self._remote_client = httpx.AsyncClient(
+            base_url=server_url.rstrip("/"),
+            auth=auth,
+            timeout=httpx.Timeout(timeout),
+        )
+        return self._remote_client
+
+    async def close(self):
+        """释放执行器持有的外部资源"""
+        if self._remote_client and not self._remote_client.is_closed:
+            await self._remote_client.aclose()
+
+    async def health_check(self) -> Tuple[bool, str]:
+        """执行运行模式健康检查"""
+        if not self.is_remote_mode():
+            return True, "local"
+
+        try:
+            client = await self._get_remote_client()
+            resp = await client.get("/global/health")
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            version = data.get("version", "unknown")
+            healthy = data.get("healthy", True)
+            return bool(healthy), f"remote(version={version})"
+        except Exception as e:
+            return False, f"remote(error={e})"
+
+    def _extract_remote_text(self, payload: dict) -> str:
+        parts = payload.get("parts", [])
+        texts = []
+        for part in parts:
+            if part.get("type") == "text":
+                text = part.get("text", "")
+                if text:
+                    texts.append(text)
+        return "\n".join(texts).strip()
+
+    async def _run_opencode_remote(self, message: str, session: OpenCodeSession) -> str:
+        client = await self._get_remote_client()
+
+        try:
+            if not session.opencode_session_id:
+                create_resp = await client.post("/session", json={})
+                create_resp.raise_for_status()
+                created = create_resp.json()
+                session_id = str(created.get("id", "")).strip()
+                if not session_id:
+                    return "❌ 远程会话创建成功但未返回 session ID。"
+                session.set_opencode_session_id(session_id)
+                self.logger.info(f"Remote OpenCode session created: {session_id}")
+
+            body = {"parts": [{"type": "text", "text": message}]}
+            resp = await client.post(
+                f"/session/{session.opencode_session_id}/message", json=body
+            )
+            resp.raise_for_status()
+
+            payload = resp.json()
+            text = self._extract_remote_text(payload)
+            return text or "(远程服务无文本响应)"
+        except httpx.HTTPStatusError as e:
+            # 远程 session 失效时自动重建一次
+            if e.response.status_code == 404 and session.opencode_session_id:
+                self.logger.warning(
+                    f"Remote session {session.opencode_session_id} not found, recreating"
+                )
+                session.clear_opencode_session_id()
+                return await self._run_opencode_remote(message, session)
+            return f"❌ 远程请求失败: HTTP {e.response.status_code}"
+        except httpx.RequestError as e:
+            return f"❌ 远程网络错误: {e}"
 
     def _parse_json_output(self, raw_output: str) -> Tuple[str, str]:
         """解析 OpenCode JSON 格式输出
@@ -53,6 +155,9 @@ class CommandExecutor:
 
     async def run_opencode(self, message: str, session: OpenCodeSession) -> str:
         """执行 OpenCode 命令，支持会话持久化"""
+        if self.is_remote_mode():
+            return await self._run_opencode_remote(message, session)
+
         opencode_path = self.config.get("basic_config", {}).get(
             "opencode_path", "opencode"
         )
@@ -124,6 +229,29 @@ class CommandExecutor:
 
     async def list_opencode_sessions(self, limit: int = 10) -> List[dict]:
         """列出 OpenCode 的 session 列表"""
+        if self.is_remote_mode():
+            try:
+                client = await self._get_remote_client()
+                resp = await client.get("/session")
+                resp.raise_for_status()
+                payload = resp.json()
+                if not isinstance(payload, list):
+                    return []
+                normalized = []
+                for item in payload[:limit]:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "id": str(item.get("id", "")),
+                            "title": item.get("title") or "无标题",
+                        }
+                    )
+                return normalized
+            except Exception as e:
+                self.logger.error(f"列出远程 session 时出错: {e}")
+                return []
+
         opencode_path = self.config.get("basic_config", {}).get(
             "opencode_path", "opencode"
         )
@@ -169,21 +297,24 @@ class CommandExecutor:
 
     async def exec_shell_cmd(self, cmd: str) -> str:
         """执行 Shell 命令"""
+        if self.is_remote_mode():
+            return "❌ 当前为服务器远程模式，已禁用 /oc-shell。本地 Shell 仅在本地模式可用。"
+
         try:
-            # 默认超时 30 秒，防止死循环
+            # 默认超时 60 秒，防止死循环
             process = await asyncio.create_subprocess_shell(
                 cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=30
+                    process.communicate(), timeout=60
                 )
             except asyncio.TimeoutError:
                 try:
                     process.kill()
                 except Exception:
                     pass
-                return "❌ 执行超时 (30s)"
+                return "❌ 执行超时 (60s)"
 
             # 使用系统默认编码解码（Windows中文版=GBK, 英文版=CP1252, Linux=UTF-8等）
             encoding = locale.getpreferredencoding(False)

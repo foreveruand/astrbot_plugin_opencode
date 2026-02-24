@@ -8,6 +8,7 @@
 ## 功能特性
 
 - **自然语言控制**: 通过聊天消息直接操作宿主电脑
+- **双连接模式**: 支持本地模式（OpenCode与Astrbot同机，Shell调用）与服务器远程模式（HTTP 连接 OpenCode Server）
 - **多模态输入**: 支持图片、文件、引用消息作为任务上下文
 - **AI 自动调用**: 注册为 LLM Function Tool，对话中自动触发
 - **多种输出模式**: 文本摘要、长图渲染、TXT 文件、合并转发
@@ -38,7 +39,7 @@
 | `/oc-new [路径]` | 重置会话并切换工作目录（清除对话上下文） | `/oc-new D:\\Projects` |
 | `/oc-end` | 仅清除对话上下文（保留当前工作目录） | `/oc-end` |
 | `/oc-session [ID]` | 查看、切换 OpenCode 会话 | `/oc-session`、`/oc-session [序号/ID/标题]` |
-| `/oc-shell <命令>` | 执行原生 Shell 命令 | `/oc-shell dir` |
+| `/oc-shell <命令>` | 执行原生 Shell 命令（仅本地模式可用） | `/oc-shell dir` |
 | `/oc-send <路径>` | 发送服务器上的文件（带路径安全检查） | `/oc-send C:\\log.txt` |
 | `/oc-clean` | 手动清理临时文件 | `/oc-clean` |
 | `/oc-history` | 查看工作目录使用历史 | `/oc-history` |
@@ -66,6 +67,11 @@
 |--------|------|--------|
 | `only_admin` | 仅管理员可用 | `true` |
 | `opencode_path` | OpenCode 可执行文件路径 | `opencode` |
+| `connection_mode` | 连接模式（`local` / `remote`） | `local` |
+| `remote_server_url` | 远程 OpenCode Server 地址（remote 模式） | (空) |
+| `remote_username` | 远程 Basic Auth 用户名（remote 模式） | `opencode` |
+| `remote_password` | 远程 Basic Auth 密码（remote 模式） | (空) |
+| `remote_timeout` | 远程请求超时（秒，remote 模式） | `300` |
 | `work_dir` | 默认工作目录 | (插件数据目录) |
 | `proxy_url` | HTTP 代理地址 | (空) |
 | `destructive_keywords` | 敏感操作关键词 (正则) | `删除`, `rm`, `delete` 等 |
@@ -87,34 +93,66 @@
 - `long_image`: 渲染为代码风格长图
 - `forward_msg`: 合并转发消息
 
+### 连接模式说明
+
+- **local（默认）**：AstrBot 与 OpenCode CLI 部署在同一台设备，沿用原有行为（包含 `/oc-shell`）。
+- **remote**：插件通过 HTTP 连接远程 OpenCode Server。此模式下 `/oc-shell` 会被安全禁用，避免误以为在远程执行系统命令。
+
+#### remote 模式工作目录语义（重要）
+
+- remote 模式下，插件显示的目录是 **AstrBot 本地缓存目录**（用于下载引用图片/文件等临时资源），不是远端服务器真实工作目录。
+- 因此，包含本机路径（如 `C:\...`、`/home/...` 或 downloaded 缓存文件）的任务，远端服务通常无法直接访问。
+- 插件会在 remote 模式自动拦截这类本地路径引用，并提示你：
+  1) 改为纯文本任务；或 2) 先把文件放到远端可访问路径；或 3) 切回 local 模式处理本机文件。
+
+#### 如何启用 remote 模式（本地回环地址示例）
+
+> 适用于你没有独立服务器、仅在本机验证 remote 模式的场景。
+
+1. 启动 OpenCode Server（本机回环地址）
+
+```bash
+opencode serve
+```
+
+如需开启认证（推荐）：
+
+```bash
+OPENCODE_SERVER_PASSWORD=your-password opencode serve --hostname 127.0.0.1 --port 4096
+```
+
+2. 在 AstrBot 插件配置中填写：
+
+- `connection_mode`: `remote`
+- `remote_server_url`: `http://127.0.0.1:4096`
+- `remote_username`: `opencode`（若你未改服务端用户名）
+- `remote_password`: 与 `OPENCODE_SERVER_PASSWORD` 保持一致（未启用认证则留空）
+- `remote_timeout`: `300`（可按网络状况调整）
+
+3. 最小验证命令：
+
+- `/oc 你好，你是谁`（验证消息调用）
+- `/oc-session`（验证会话列表接口）
+- `/oc-shell dir`（remote 模式下应提示禁用，这是预期行为）
+
+4. 常见问题排查：
+
+- 连接失败：确认 `opencode serve` 进程仍在运行，端口与 URL 一致。
+- 401/403：用户名或密码不匹配。
+- 超时：提高 `remote_timeout`，例如 `600`。
+
+#### OpenCode 官方教程链接
+
+- Server 文档（官方）：https://opencode.ai/docs/server/
+- CLI 文档（官方）：https://opencode.ai/docs/cli/
+- Web 文档（官方）：https://opencode.ai/docs/web/
+
 ### LLM 工具配置
 
 | 配置项 | 说明 |
 |--------|------|
 | `tool_description` | Function Tool 描述 (影响 AI 何时调用) |
 | `arg_description` | 参数描述 |
-
-## 使用场景
-
-### 场景一: 文件操作
-```
-用户: /oc 把桌面上所有 PDF 移动到"文档"文件夹
-机器人: 🚀 执行中...
-机器人: ✅ 已移动 5 个文件
-```
-
-### 场景二: 图片处理
-```
-用户: /oc 把这张图转成黑白 [附带图片]
-机器人: ✅ 处理完成，已保存至 output.png
-```
-
-### 场景三: AI 自动调用
-```
-用户: 帮我看看系统内存占用多少
-机器人: (自动调用 call_opencode)
-机器人: 当前内存使用率 67%，可用 8.2GB
-```
 
 ## 安全说明
 
@@ -141,126 +179,90 @@
 
 ## 用例模拟
 
+下面的场景覆盖插件核心能力（本地/远程双模式、会话、安全、输出与运维命令）。
+
 <details>
-<summary>点击展开：插件交互用例模拟 (Use Cases)</summary>
+<summary>点击此处展开</summary>
 
-### 场景 1：自然语言文件操作 (LLM Tool 调用)
-*用户在聊天中直接提出需求，插件自动识别意图并调用 OpenCode 执行。*
+### 1) 本地模式：自然语言任务执行（`/oc`）
+```text
+用户: /oc 帮我创建一个 Python 项目骨架，并生成 README
+机器人: 🚀 执行中... (本地模式)
+机器人: ✅ 已创建 main.py / requirements.txt / README.md
+```
 
-**用户**：帮我在桌面上创建一个名为 "周报" 的文件夹，并在里面新建一个 "todo.txt"，内容写上 "下周一开会"。
-**AstrBot**：(识别到意图，自动调用 `call_opencode`)
-**AstrBot**：
-> 🚀 执行中...
-> 📂 D:\AstrBot\data\plugin_data\astrbot_plugin_opencode\workspace
-> 
-> OpenCode 输出：
-> 1. Created directory: C:\Users\Admin\Desktop\周报
-> 2. Created file: C:\Users\Admin\Desktop\周报\todo.txt
-> 3. Content written to todo.txt
+### 2) 多模态输入：图片/引用消息参与任务
+```text
+用户: [发送截图] /oc 按这张图复刻页面并保存为 index.html
+机器人: 🚀 执行中... (本地模式)
+机器人: ✅ 已完成页面生成并写入 index.html
+```
 
----
+### 3) 会话持续上下文：连续对话与切换
+```text
+用户: /oc 先创建 tests 目录
+用户: /oc 再给 tests 里加一个基础用例
+机器人: ✅ 已基于上一步继续完成
 
-### 场景 2：基于图片的代码生成 (多模态)
-*用户发送图片并要求写代码，插件下载图片并传给 OpenCode 进行分析。*
+用户: /oc-session
+机器人: 📋 显示最近会话列表
 
-**用户**：[发送一张网页截图]
-**用户**：/oc 用 HTML 和 CSS 复刻这个网页布局，保存为 index.html
-**AstrBot**：
-> 🚀 执行中...
-> 📂 ...\workspace
-> 
-> OpenCode 输出：
-> Analyzing image...
-> Generating HTML structure...
-> Writing to index.html...
-> Done.
+用户: /oc-session ses_xxx
+机器人: ✅ 已切换到指定会话
+```
 
----
+### 4) 会话重置与目录切换（`/oc-new` / `/oc-end`）
+```text
+用户: /oc-new D:\Projects\demo
+机器人: ✅ 已启动 OpenCode 新会话（清空上下文并切换目录）
 
-### 场景 3：直接执行 Shell 命令 (oc-shell)
-*管理员需要快速查看系统状态或执行特定命令。*
+用户: /oc-end
+机器人: 🚫 已结束当前会话（仅清上下文，目录保留）
+```
 
-**用户**：/oc-shell dir /w
-**AstrBot**：🚀 Shell 执行中: dir /w
-**AstrBot**：
-> 输出:
-> 驱动器 D 中的卷是 Data
-> 卷的序列号是 1234-5678
->
-> D:\AstrBot\data\plugin_data\astrbot_plugin_opencode\workspace 的目录
->
-> [.]              [..]             [downloaded]     index.html       test.py
->                2 个文件          2,048 字节
->                3 个目录     50,000,000,000 可用字节
->
-> (Return Code: 0)
+### 5) 安全确认：敏感操作拦截
+```text
+用户: /oc 删除当前目录全部文件
+机器人: ⚠️ 敏感操作确认，需回复“确认”后继续
+```
 
----
+### 6) 本地模式专属：Shell 命令（`/oc-shell`）
+```text
+用户: /oc-shell dir /w
+机器人: 🚀 Shell 执行中...
+机器人: 输出... (Return Code: 0)
+```
 
-### 场景 4：敏感操作安全拦截
-*用户尝试执行危险操作，插件自动触发二次确认。*
+### 7) 远程模式：连接 OpenCode Server（`connection_mode=remote`）
+```text
+用户: /oc 你好，请总结今天的任务
+机器人: 🚀 执行中... (服务器远程模式)
+机器人: ✅ 返回远程 OpenCode Server 结果
+```
 
-**用户**：/oc 删除 D盘所有文件
-**AstrBot**：
-> ⚠️ 敏感操作确认：'删除 D盘所有文件'
-> 回复'确认'继续，其他取消 (30s)
+### 8) 远程模式保护：本地路径自动拦截
+```text
+用户: /oc 请处理 C:\Users\me\Desktop\a.txt
+机器人: ⚠️ 检测到本地路径，远端无法直接访问；提示改为纯文本/上传到远端后再执行
+```
 
-**用户**：确认
-**AstrBot**：执行中...
-**AstrBot**：(执行删除操作并返回结果)
+### 9) 文件发送与路径安全（`/oc-send`）
+```text
+用户: /oc-send D:\Projects\config.yaml
+机器人: [发送文件 config.yaml]
 
----
+用户: /oc-send C:\Windows\System32\cmd.exe
+机器人: ⚠️ 路径安全警告（若启用 check_path_safety）
+```
 
-### 场景 5：远程文件获取 (oc-send)
-*用户想要获取服务器上的特定文件。*
+### 10) 输出与运维：长文本处理、清理与历史
+```text
+用户: /oc-shell type big_log.txt
+机器人: 自动按输出配置处理（截断/摘要/TXT/长图）
 
-**用户**：/oc-send D:\Projects\config.yaml
-**AstrBot**：[发送文件: config.yaml]
+用户: /oc-clean
+机器人: 🧹 清理完成，返回释放空间
 
-*如果尝试获取非法路径：*
-**用户**：/oc-send C:\Windows\System32\cmd.exe
-**AstrBot**：
-> ⚠️ 安全警告：该文件不在允许的工作目录范围内。
-> 文件路径: C:\Windows\System32\cmd.exe
-> 允许的目录包括：...
-
----
-
-### 场景 6：长文本/大量日志处理
-*当命令输出非常长时，插件会自动处理以防止刷屏。*
-
-**用户**：/oc-shell type big_log.txt
-**AstrBot**：(检测到输出超过 1000 字符)
-> 2023-10-01 10:00:00 [INFO] Start...
-> ...
-> (中间省略 5000 字符)
-> ...
-> 2023-10-01 10:00:05 [INFO] End.
->
-> [文件: opencode_output_1696123456.txt] (完整日志已保存为文件)
-
----
-
-### 场景 7：会话持久化与管理
-*多次 /oc 命令自动保持上下文，AI 记住之前的对话。*
-
-**用户**：/oc 创建一个 Python 项目结构
-**AstrBot**：✅ 已创建项目结构：main.py, utils/, tests/...
-
-**用户**：/oc 在刚才创建的 main.py 里写一个 Hello World
-**AstrBot**：✅ 已写入 main.py（AI 记住了上一条消息的上下文）
-
-**用户**：/oc-session
-**AstrBot**：
-> 📋 最近的 OpenCode 会话：
-> 1. `ses_abc123` - Python 项目创建
-> 2. `ses_def456` - 文件整理任务
-> ...
-
-**用户**：/oc-session ses_def456
-**AstrBot**：✅ 已切换到会话: ses_def456
-
-**用户**：/oc-new D:\NewProject
-**AstrBot**：✅ 已重置会话并切换工作目录到 D:\NewProject
-
-</details>
+用户: /oc-history
+机器人: 📂 显示最近工作目录使用记录
+```
