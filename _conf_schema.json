@@ -98,7 +98,7 @@
             "tool_description": {
                 "description": "Function Tool 描述",
                 "type": "text",
-                "default": "在用户电脑上调用 OpenCode 等 AI 智能体 Agent 执行操作的工具。当用户有执行自动化终端命令等操作电脑的高级需求时，调用此工具。",
+                "default": "在用户电脑上调用 OpenCode 等 AI 智能体 Agent 的工具。当用户有执行编程、处理文档等复杂任务的高级需求时，调用此工具。",
                 "hint": "让大模型理解这个工具是干什么的，决定何时调用它。"
             },
             "arg_description": {
@@ -116,7 +116,7 @@
             "output_modes": {
                 "description": "结果展示积木（多选）",
                 "type": "list",
-                "default": ["full_text", "txt_file"],
+                "default": ["ai_summary", "txt_file", "long_image", "full_text"],
                 "options": [
                     "last_line",
                     "ai_summary",
@@ -124,7 +124,13 @@
                     "txt_file",
                     "long_image"
                 ],
-                "hint": "选择输出方式组合。last_line: 仅最后一段(超长截断); ai_summary: AI摘要(仅长文本); full_text: 全量文本(自动切分); txt_file: TXT文件(仅长文本); long_image: 渲染为长图(始终生效)。多个积木或 full_text 切分时自动合并转发。"
+                "hint": "选择输出方式组合。last_line: 仅最后一段(超长截断); ai_summary: AI摘要; full_text: 全量文本(自动切分); txt_file: TXT文件; long_image: 渲染为长图。是否按长文本阈值智能触发由下方 smart_trigger 开关决定。"
+            },
+            "merge_forward_enabled": {
+                "description": "启用合并转发发送",
+                "type": "bool",
+                "default": false,
+                "hint": "开启：按顺序合并发送所有命中的积木。关闭：按顺序逐条发送；full_text 将单独使用一次合并转发发送，避免刷屏。"
             },
             "summary_provider": {
                 "description": "AI 摘要服务提供商",
@@ -137,7 +143,25 @@
                 "description": "长文本阈值(字符数)",
                 "type": "int",
                 "default": 1000,
-                "hint": "输出超过此长度时触发 ai_summary 和 txt_file。也用于 full_text 切分和 last_line 截断。long_image 不受此限制。"
+                "hint": "用于智能触发阈值。对应 smart_trigger 开启时，仅在输出超过此长度才展示对应积木；关闭 smart_trigger 时，只要勾选就总是展示。也用于 full_text 切分和 last_line 截断。"
+            },
+            "smart_trigger_ai_summary": {
+                "description": "ai_summary 智能触发",
+                "type": "bool",
+                "default": true,
+                "hint": "开启：仅在文本超过阈值时展示 ai_summary。关闭：只要勾选 ai_summary 就总是展示。"
+            },
+            "smart_trigger_txt_file": {
+                "description": "txt_file 智能触发",
+                "type": "bool",
+                "default": true,
+                "hint": "开启：仅在文本超过阈值时展示 txt_file。关闭：只要勾选 txt_file 就总是展示。"
+            },
+            "smart_trigger_long_image": {
+                "description": "long_image 智能触发",
+                "type": "bool",
+                "default": true,
+                "hint": "开启：仅在文本超过阈值时展示 long_image。关闭：只要勾选 long_image 就总是展示。"
             }
         }
     }

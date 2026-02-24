@@ -5,7 +5,9 @@ AstrBot OpenCode 插件 - 让 AstrBot 对接 OpenCode，通过自然语言远程
 import asyncio
 import os
 import re
+import shlex
 from datetime import datetime
+from typing import Optional
 
 from pathlib import Path
 
@@ -30,7 +32,7 @@ from .core.output import OutputProcessor
     "astrbot_plugin_opencode",
     "singularity2000",
     "让 AstrBot 对接 OpenCode，通过自然语言远程指挥电脑干活。使用此插件，意味着你已知晓相关风险。",
-    "1.2.0",
+    "1.3.0",
     "https://github.com/singularity2000/astrbot_plugin_opencode",
 )
 class OpenCodePlugin(Star):
@@ -51,6 +53,7 @@ class OpenCodePlugin(Star):
         self.input_proc = InputProcessor()
         self.executor = CommandExecutor(config)
         self.output_proc = OutputProcessor(config, self.base_data_dir)
+        self._send_file_list_cache: dict[str, dict] = {}
 
         # 设置模块间的回调函数，建立模块间的通信
         self.session_mgr.set_record_workdir_callback(self.storage_mgr.record_workdir)
@@ -103,6 +106,233 @@ class OpenCodePlugin(Star):
             "2. 先把文件放到远端服务器可访问路径后再让 OpenCode 处理；\n"
             "3. 需要直接操作本机文件时，请将 connection_mode 切换为 local。"
         )
+
+    def _get_send_page_size(self) -> int:
+        return 50
+
+    def _get_send_scan_limit(self) -> int:
+        return 10000
+
+    def _extract_oc_send_args(self, event: AstrMessageEvent, fallback_path: str) -> str:
+        full_command = event.message_str.strip()
+        parts = full_command.split(" ", 1)
+        if len(parts) > 1:
+            return parts[1].strip()
+        return (fallback_path or "").strip()
+
+    def _is_absolute_like_path(self, path_text: str) -> bool:
+        if os.path.isabs(path_text):
+            return True
+        return bool(re.match(r"^[A-Za-z]:[\\/]", path_text))
+
+    def _tokenize_send_args(self, arg_text: str) -> list[str]:
+        if not arg_text:
+            return []
+        try:
+            pieces = shlex.split(arg_text, posix=False)
+        except ValueError:
+            pieces = arg_text.split()
+
+        tokens: list[str] = []
+        for piece in pieces:
+            for part in piece.split(","):
+                token = part.strip().strip('"').strip("'")
+                if token:
+                    tokens.append(token)
+        return tokens
+
+    def _scan_workspace_files(self, work_dir: str, keyword: str = "") -> dict:
+        page_size = self._get_send_page_size()
+        scan_limit = self._get_send_scan_limit()
+        keyword_lower = keyword.lower().strip()
+
+        rel_files: list[str] = []
+        scanned = 0
+        truncated = False
+
+        for root, _, files in os.walk(work_dir, onerror=lambda _: None):
+            for filename in files:
+                scanned += 1
+                if scanned > scan_limit:
+                    truncated = True
+                    break
+
+                abs_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(abs_path, work_dir).replace("\\", "/")
+                if keyword_lower and keyword_lower not in rel_path.lower():
+                    continue
+                rel_files.append(rel_path)
+
+            if truncated:
+                break
+
+        rel_files.sort()
+        total = len(rel_files)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+
+        return {
+            "work_dir": work_dir,
+            "files": rel_files,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "keyword": keyword,
+            "scanned": scanned,
+            "truncated": truncated,
+            "created_at": datetime.now().isoformat(),
+        }
+
+    def _render_send_file_page(self, snapshot: dict, page: int) -> str:
+        files = snapshot["files"]
+        total = snapshot["total"]
+        page_size = snapshot["page_size"]
+        total_pages = snapshot["total_pages"]
+        page = max(1, min(page, total_pages))
+
+        start = (page - 1) * page_size
+        end = min(start + page_size, total)
+
+        lines = [
+            "📄 可发送文件列表（当前工作区，递归）",
+            f"📂 目录: {snapshot['work_dir']}",
+            f"📊 共 {total} 个文件 | 第 {page}/{total_pages} 页 | 每页 {page_size} 条",
+        ]
+
+        keyword = (snapshot.get("keyword") or "").strip()
+        if keyword:
+            lines.append(f"🔎 过滤关键词: {keyword}")
+
+        if snapshot.get("truncated"):
+            lines.append(
+                f"⚠️ 已触发扫描上限（{self._get_send_scan_limit()}），结果可能不完整。建议使用 /oc-send --find 关键词 缩小范围。"
+            )
+
+        lines.append("")
+
+        if total == 0:
+            lines.append("（没有可发送的文件）")
+        else:
+            for idx in range(start, end):
+                rel_path = files[idx]
+                display = (
+                    rel_path
+                    if len(rel_path) <= 120
+                    else rel_path[:57] + "..." + rel_path[-60:]
+                )
+                lines.append(f"{idx + 1}. {display}")
+
+        lines.extend(
+            [
+                "",
+                "快捷发送示例:",
+                "- /oc-send 1",
+                "- /oc-send 2,5,8",
+                "- /oc-send 10-15",
+                "- /oc-send src/main.py docs/readme.md",
+                "- /oc-send --page 2",
+                "- /oc-send --find config",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _parse_send_page_query(self, arg_text: str) -> Optional[int]:
+        match = re.fullmatch(r"--page\s+(\d+)", arg_text.strip())
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _parse_send_find_query(self, arg_text: str) -> Optional[str]:
+        match = re.fullmatch(r"--find\s+(.+)", arg_text.strip())
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def _expand_index_tokens(
+        self, tokens: list[str], max_index: int
+    ) -> tuple[list[int], list[str]]:
+        indexes: list[int] = []
+        errors: list[str] = []
+
+        for token in tokens:
+            range_match = re.fullmatch(r"(\d+)-(\d+)", token)
+            if range_match:
+                start = int(range_match.group(1))
+                end = int(range_match.group(2))
+                if start > end:
+                    errors.append(f"无效范围: {token}")
+                    continue
+                for idx in range(start, end + 1):
+                    if 1 <= idx <= max_index:
+                        indexes.append(idx)
+                    else:
+                        errors.append(f"序号越界: {idx}")
+                continue
+
+            if token.isdigit():
+                idx = int(token)
+                if 1 <= idx <= max_index:
+                    indexes.append(idx)
+                else:
+                    errors.append(f"序号越界: {idx}")
+
+        deduped_indexes: list[int] = []
+        for idx in indexes:
+            if idx not in deduped_indexes:
+                deduped_indexes.append(idx)
+        return deduped_indexes, errors
+
+    def _resolve_send_targets(
+        self,
+        sender_id: str,
+        session,
+        arg_text: str,
+    ) -> tuple[list[str], list[str]]:
+        tokens = self._tokenize_send_args(arg_text)
+        if not tokens:
+            return [], ["未提供可识别的文件参数。"]
+
+        snapshot = self._send_file_list_cache.get(sender_id)
+        max_index = len(snapshot["files"]) if snapshot else 0
+
+        index_tokens: list[str] = []
+        path_tokens: list[str] = []
+        for token in tokens:
+            if re.fullmatch(r"\d+", token) or re.fullmatch(r"\d+-\d+", token):
+                index_tokens.append(token)
+            else:
+                path_tokens.append(token)
+
+        resolved: list[str] = []
+        errors: list[str] = []
+
+        if index_tokens:
+            if not snapshot:
+                errors.append(
+                    "未找到可用编号快照，请先执行一次 /oc-send 获取列表后再按序号发送。"
+                )
+            else:
+                indexes, idx_errors = self._expand_index_tokens(index_tokens, max_index)
+                errors.extend(idx_errors)
+                for idx in indexes:
+                    rel_path = snapshot["files"][idx - 1]
+                    abs_path = os.path.abspath(
+                        os.path.join(snapshot["work_dir"], rel_path)
+                    )
+                    resolved.append(abs_path)
+
+        for token in path_tokens:
+            candidate = os.path.expanduser(token)
+            if self._is_absolute_like_path(candidate):
+                abs_path = os.path.abspath(candidate)
+            else:
+                abs_path = os.path.abspath(os.path.join(session.work_dir, candidate))
+            resolved.append(abs_path)
+
+        deduped: list[str] = []
+        for p in resolved:
+            if p not in deduped:
+                deduped.append(p)
+        return deduped, errors
 
     async def initialize(self):
         """插件初始化"""
@@ -220,14 +450,20 @@ class OpenCodePlugin(Star):
 
             yield event.plain_result(self._render_exec_status(session))
             output = await self.executor.run_opencode(final_message, session)
-            res = await self.output_proc.parse_output(output, event, session)
-            yield event.chain_result(res)
+            send_plan = await self.output_proc.parse_output_plan(output, event, session)
+            for idx, components in enumerate(send_plan):
+                if idx > 0:
+                    await asyncio.sleep(self.output_proc.next_send_delay())
+                yield event.chain_result(components)
             return
 
         yield event.plain_result(self._render_exec_status(session))
         output = await self.executor.run_opencode(final_message, session)
-        result_chain = await self.output_proc.parse_output(output, event, session)
-        yield event.chain_result(result_chain)
+        send_plan = await self.output_proc.parse_output_plan(output, event, session)
+        for idx, components in enumerate(send_plan):
+            if idx > 0:
+                await asyncio.sleep(self.output_proc.next_send_delay())
+            yield event.chain_result(components)
 
     @filter.command("oc-shell")
     async def oc_shell(self, event: AstrMessageEvent, cmd: str = ""):
@@ -286,55 +522,101 @@ class OpenCodePlugin(Star):
             result = await self.executor.exec_shell_cmd(actual_cmd)
             sender_id = event.get_sender_id()
             session = self.session_mgr.get_or_create_session(sender_id)
-            res = await self.output_proc.parse_output(result, event, session)
-            yield event.chain_result(res)
+            send_plan = await self.output_proc.parse_output_plan(result, event, session)
+            for idx, components in enumerate(send_plan):
+                if idx > 0:
+                    await asyncio.sleep(self.output_proc.next_send_delay())
+                yield event.chain_result(components)
             return
 
         yield event.plain_result(f"🚀 Shell 执行中: {actual_cmd}")
         result = await self.executor.exec_shell_cmd(actual_cmd)
         sender_id = event.get_sender_id()
         session = self.session_mgr.get_or_create_session(sender_id)
-        res = await self.output_proc.parse_output(result, event, session)
-        yield event.chain_result(res)
+        send_plan = await self.output_proc.parse_output_plan(result, event, session)
+        for idx, components in enumerate(send_plan):
+            if idx > 0:
+                await asyncio.sleep(self.output_proc.next_send_delay())
+            yield event.chain_result(components)
 
     @filter.command("oc-send")
     async def oc_send(self, event: AstrMessageEvent, path: str = ""):
-        """发送服务器文件。用法：/oc-send [绝对路径]"""
+        """发送文件。用法：/oc-send（列文件）| /oc-send 1,2 | /oc-send 相对路径/绝对路径"""
         if not self.security.is_admin(event):
             yield event.plain_result("权限不足。")
             return
 
-        target_path = path.strip()
-        if not target_path:
-            yield event.plain_result("请提供文件路径。")
-            return
-
-        target_path = os.path.expanduser(target_path)
-
-        if not os.path.exists(target_path) or not os.path.isfile(target_path):
-            yield event.plain_result(f"❌ 文件不存在或不是文件: {target_path}")
-            return
-
         sender_id = event.get_sender_id()
-        session = self.session_mgr.get_session(sender_id)
+        session = self.session_mgr.get_or_create_session(sender_id)
+        arg_text = self._extract_oc_send_args(event, path)
 
-        if not self.security.is_path_safe(target_path, session):
+        if not arg_text:
+            snapshot = self._scan_workspace_files(session.work_dir)
+            self._send_file_list_cache[sender_id] = snapshot
+            yield event.plain_result(self._render_send_file_page(snapshot, page=1))
+            return
+
+        page_query = self._parse_send_page_query(arg_text)
+        if page_query is not None:
+            snapshot = self._send_file_list_cache.get(sender_id)
+            if not snapshot:
+                snapshot = self._scan_workspace_files(session.work_dir)
+                self._send_file_list_cache[sender_id] = snapshot
             yield event.plain_result(
-                f"⚠️ 安全警告：该文件不在允许的工作目录范围内。\n"
-                f"文件路径: {target_path}\n"
-                f"允许的目录包括：\n"
-                f"  1. 当前会话工作目录\n"
-                f"  2. 插件数据目录\n"
-                f"  3. 历史使用的工作目录\n\n"
-                f"如需访问此文件，请先使用 /oc-new 切换到该目录。"
+                self._render_send_file_page(snapshot, page=page_query)
             )
+            return
+
+        keyword = self._parse_send_find_query(arg_text)
+        if keyword is not None:
+            snapshot = self._scan_workspace_files(session.work_dir, keyword=keyword)
+            self._send_file_list_cache[sender_id] = snapshot
+            yield event.plain_result(self._render_send_file_page(snapshot, page=1))
+            return
+
+        resolved_paths, parse_errors = self._resolve_send_targets(
+            sender_id, session, arg_text
+        )
+        valid_files: list[str] = []
+        validation_errors: list[str] = []
+
+        for target_path in resolved_paths:
+            if not os.path.exists(target_path) or not os.path.isfile(target_path):
+                validation_errors.append(f"不存在或不是文件: {target_path}")
+                continue
+
+            if not self.security.is_path_safe(target_path, session):
+                validation_errors.append(f"不在允许目录范围内: {target_path}")
+                continue
+
+            valid_files.append(target_path)
+
+        all_errors = parse_errors + validation_errors
+        if not valid_files:
+            if all_errors:
+                lines = "\n".join([f"- {msg}" for msg in all_errors[:20]])
+                yield event.plain_result(
+                    "❌ 没有可发送的有效文件：\n"
+                    f"{lines}\n\n"
+                    "提示：先执行 /oc-send 查看编号，或改用明确的相对/绝对路径。"
+                )
+            else:
+                yield event.plain_result("❌ 没有可发送的有效文件。")
             return
 
         try:
-            abs_path = os.path.abspath(target_path)
-            yield event.chain_result(
-                [File(file=abs_path, name=os.path.basename(target_path))]
-            )
+            components = [
+                File(file=os.path.abspath(p), name=os.path.basename(p))
+                for p in valid_files
+            ]
+            yield event.chain_result(components)
+
+            if all_errors:
+                lines = "\n".join([f"- {msg}" for msg in all_errors[:20]])
+                yield event.plain_result(
+                    f"✅ 已发送 {len(valid_files)} 个文件。\n"
+                    f"⚠️ 另有 {len(all_errors)} 项未发送：\n{lines}"
+                )
         except OSError as e:
             self.logger.error(f"文件发送失败 (权限或路径问题): {e}")
             yield event.plain_result(f"❌ 发送失败: {e}")
@@ -559,7 +841,7 @@ class OpenCodePlugin(Star):
     async def call_opencode_tool(
         self, event: AstrMessageEvent, task_description: str
     ) -> MessageEventResult:
-        """在用户电脑上调用 OpenCode 等 AI 智能体 Agent 执行操作的工具。当用户有执行自动化终端命令等操作电脑的高级需求时，调用此工具。
+        """在用户电脑上调用 OpenCode 等 AI 智能体 Agent 的工具。当用户有执行编程、处理文档等复杂任务的高级需求时，调用此工具。
 
         Args:
             task_description(string): 详细的任务描述。保持原意，允许适当编辑以提升精准度，也可以不修改。此参数会被传送给 OpenCode 作为输入。
@@ -642,17 +924,16 @@ class OpenCodePlugin(Star):
 
         try:
             output = await self.executor.run_opencode(task, session)
-            result_components = await self.output_proc.parse_output(
-                output, event, session
-            )
+            send_plan = await self.output_proc.parse_output_plan(output, event, session)
 
-            # parse_output 返回的是组件列表，需要逐个添加到 MessageChain
-            message_chain = MessageChain()
-            for comp in result_components:
-                message_chain.chain.append(comp)
+            for idx, components in enumerate(send_plan):
+                if idx > 0:
+                    await asyncio.sleep(self.output_proc.next_send_delay())
 
-            # 主动推送执行结果
-            await self.context.send_message(umo, message_chain)
+                message_chain = MessageChain()
+                for comp in components:
+                    message_chain.chain.append(comp)
+                await self.context.send_message(umo, message_chain)
         except Exception as e:
             self.logger.error(f"OpenCode 后台执行失败: {e}")
             try:

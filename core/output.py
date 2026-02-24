@@ -5,6 +5,7 @@
 import asyncio
 import html
 import os
+import random
 import re
 import time
 from typing import List, Callable, Awaitable
@@ -144,6 +145,24 @@ class OutputProcessor:
         """设置模板目录"""
         self._template_dir = template_dir
 
+    def next_send_delay(self) -> float:
+        """获取逐条发送时的随机间隔，降低风控风险。"""
+        return random.uniform(0.7, 1.3)
+
+    @staticmethod
+    def _should_show_mode(
+        mode: str,
+        output_modes: list,
+        is_long: bool,
+        smart_trigger_enabled: bool,
+    ) -> bool:
+        """统一判断积木是否应当出现。"""
+        if mode not in output_modes:
+            return False
+        if smart_trigger_enabled:
+            return is_long
+        return True
+
     async def render_long_image(self, text: str) -> str:
         """渲染长图"""
         if not self._template_dir or not self._html_render:
@@ -167,13 +186,17 @@ class OutputProcessor:
             self.logger.error(f"模板渲染失败: {e}")
             return None
 
-    async def parse_output(
+    async def parse_output_plan(
         self, output: str, event: AstrMessageEvent, session: OpenCodeSession = None
-    ) -> List:
-        """解析输出并构造消息"""
+    ) -> List[List]:
+        """解析输出并构造发送计划（每个元素代表一次消息发送的组件列表）。"""
         output_config = self.config.get("output_config", {})
         output_modes = output_config.get("output_modes", ["full_text", "txt_file"])
         max_length = output_config.get("max_text_length", 1000)
+        merge_forward_enabled = output_config.get("merge_forward_enabled", True)
+        smart_trigger_ai_summary = output_config.get("smart_trigger_ai_summary", True)
+        smart_trigger_txt_file = output_config.get("smart_trigger_txt_file", True)
+        smart_trigger_long_image = output_config.get("smart_trigger_long_image", True)
 
         # 兼容性处理
         if "forward_msg" in output_modes:
@@ -201,7 +224,9 @@ class OutputProcessor:
         blocks = {}
 
         # (1) AI Summary
-        if "ai_summary" in output_modes and is_long:
+        if self._should_show_mode(
+            "ai_summary", output_modes, is_long, smart_trigger_ai_summary
+        ):
             try:
                 umo = event.unified_msg_origin
                 provider_id = await self._get_provider_id(umo=umo)
@@ -216,8 +241,10 @@ class OutputProcessor:
             except Exception:
                 blocks["ai_summary"] = Plain("AI 摘要生成失败。")
 
-        # (2) Long Image - 只要选中就渲染，不受 is_long 限制
-        if "long_image" in output_modes:
+        # (2) Long Image
+        if self._should_show_mode(
+            "long_image", output_modes, is_long, smart_trigger_long_image
+        ):
             try:
                 img_url = await self.render_long_image(final_text)
                 if img_url:
@@ -226,7 +253,9 @@ class OutputProcessor:
                 self.logger.error(f"长图渲染失败: {e}")
 
         # (3) TXT File
-        if "txt_file" in output_modes and is_long:
+        if self._should_show_mode(
+            "txt_file", output_modes, is_long, smart_trigger_txt_file
+        ):
             log_dir = self.base_data_dir
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, f"opencode_output_{int(time.time())}.txt")
@@ -264,6 +293,13 @@ class OutputProcessor:
         # === 2. 调度逻辑 ===
         valid_block_keys = [k for k in blocks.keys() if blocks[k]]
         count = len(valid_block_keys)
+        ordered_keys = [
+            "ai_summary",
+            "last_line",
+            "txt_file",
+            "long_image",
+            "full_text",
+        ]
 
         # 辅助函数：构造合并转发节点
         def make_node(content_list):
@@ -271,47 +307,67 @@ class OutputProcessor:
             name = "OpenCode"
             return Node(uin=uin, name=name, content=content_list)
 
-        # Case A: 如果实际生成的积木多于一个 -> 一定合并转发
-        if count > 1:
+        # Case A: merge 开启，沿用原有的合并转发主路径
+        if merge_forward_enabled and count > 1:
             forward_nodes = Nodes([])
 
-            if "ai_summary" in blocks:
-                forward_nodes.nodes.append(make_node([blocks["ai_summary"]]))
+            for key in ordered_keys:
+                if key not in blocks:
+                    continue
+                if key == "full_text":
+                    for p in blocks["full_text"]:
+                        forward_nodes.nodes.append(make_node([p]))
+                else:
+                    forward_nodes.nodes.append(make_node([blocks[key]]))
 
-            if "last_line" in blocks:
-                forward_nodes.nodes.append(make_node([blocks["last_line"]]))
+            return [[forward_nodes]]
 
-            if "txt_file" in blocks:
-                forward_nodes.nodes.append(make_node([blocks["txt_file"]]))
-
-            if "long_image" in blocks:
-                forward_nodes.nodes.append(make_node([blocks["long_image"]]))
-
-            if "full_text" in blocks:
-                for p in blocks["full_text"]:
-                    forward_nodes.nodes.append(make_node([p]))
-
-            return [forward_nodes]
-
-        # Case B: 只有一个积木
-        elif count == 1:
+        # Case B: merge 开启 + 只有一个积木
+        if merge_forward_enabled and count == 1:
             key = valid_block_keys[0]
             content = blocks[key]
 
             if key in ["ai_summary", "long_image", "txt_file"]:
-                return [content]
+                return [[content]]
 
             elif key == "last_line":
-                return [content]
+                return [[content]]
 
             elif key == "full_text":
                 if len(content) == 1:
-                    return [content[0]]
+                    return [[content[0]]]
                 else:
                     forward_nodes = Nodes([])
                     for p in content:
                         forward_nodes.nodes.append(make_node([p]))
-                    return [forward_nodes]
+                    return [[forward_nodes]]
 
-        # Case C: 兜底
-        return [Plain("执行完成 (无符合条件的输出)。")]
+        # Case C: merge 关闭 -> 顺序逐条发；full_text 单独一次合并转发
+        if not merge_forward_enabled:
+            send_plan: List[List] = []
+
+            for key in ordered_keys:
+                if key not in blocks or key == "full_text":
+                    continue
+                send_plan.append([blocks[key]])
+
+            if "full_text" in blocks:
+                forward_nodes = Nodes([])
+                for p in blocks["full_text"]:
+                    forward_nodes.nodes.append(make_node([p]))
+                send_plan.append([forward_nodes])
+
+            if send_plan:
+                return send_plan
+
+        # Case D: 兜底
+        return [[Plain("执行完成 (无符合条件的输出)。")]]
+
+    async def parse_output(
+        self, output: str, event: AstrMessageEvent, session: OpenCodeSession = None
+    ) -> List:
+        """兼容接口：返回发送计划中的第一条消息组件。"""
+        send_plan = await self.parse_output_plan(output, event, session)
+        if not send_plan:
+            return [Plain("执行完成 (无符合条件的输出)。")]
+        return send_plan[0]

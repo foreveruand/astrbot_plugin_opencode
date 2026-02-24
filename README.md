@@ -40,7 +40,7 @@
 | `/oc-end` | 仅清除对话上下文（保留当前工作目录） | `/oc-end` |
 | `/oc-session [ID]` | 查看、切换 OpenCode 会话 | `/oc-session`、`/oc-session [序号/ID/标题]` |
 | `/oc-shell <命令>` | 执行原生 Shell 命令（仅本地模式可用） | `/oc-shell dir` |
-| `/oc-send <路径>` | 发送服务器上的文件（带路径安全检查） | `/oc-send C:\\log.txt` |
+| `/oc-send [参数]` | 列出并发送文件（支持序号/范围/相对路径/绝对路径） | `/oc-send`、`/oc-send 1,3`、`/oc-send src/a.py` |
 | `/oc-clean` | 手动清理临时文件 | `/oc-clean` |
 | `/oc-history` | 查看工作目录使用历史 | `/oc-history` |
 
@@ -83,20 +83,37 @@
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `output_modes` | 输出方式 (多选) | `last_line`, `txt_file` |
+| `output_modes` | 输出方式 (多选) | `full_text`, `txt_file` |
+| `merge_forward_enabled` | 是否启用合并转发发送 | `true` |
 | `max_text_length` | 长文本阈值 | `1000` |
+| `smart_trigger_ai_summary` | ai_summary 是否按阈值智能触发 | `true` |
+| `smart_trigger_txt_file` | txt_file 是否按阈值智能触发 | `true` |
+| `smart_trigger_long_image` | long_image 是否按阈值智能触发 | `true` |
 
 **可选输出模式**:
 - `last_line`: 显示文本 (长文本自动截断首尾)
 - `ai_summary`: AI 智能摘要
 - `txt_file`: 生成 TXT 文件
 - `long_image`: 渲染为代码风格长图
-- `forward_msg`: 合并转发消息
+- `full_text`: 全量文本（超阈值按 `max_text_length` 自动切分）
+
+**发送与智能触发规则**:
+- `merge_forward_enabled=true`：按顺序将命中的积木合并转发发送。
+- `merge_forward_enabled=false`：按顺序逐条发送命中的积木；`full_text` 会单独使用一次合并转发发送，避免长文刷屏。
+- 对 `ai_summary` / `txt_file` / `long_image`：
+  - 对应 `smart_trigger_xxx=true` 时，仅当输出长度超过 `max_text_length` 且积木被勾选才出现；
+  - 对应 `smart_trigger_xxx=false` 时，只要积木被勾选就总是出现。
 
 ### 连接模式说明
 
 - **local（默认）**：AstrBot 与 OpenCode CLI 部署在同一台设备，沿用原有行为（包含 `/oc-shell`）。
 - **remote**：插件通过 HTTP 连接远程 OpenCode Server。此模式下 `/oc-shell` 会被安全禁用，避免误以为在远程执行系统命令。
+
+#### `/oc-send` 在 local/remote 下的语义
+
+- `/oc-send` 始终发送 **AstrBot 插件宿主机可访问** 的文件（即插件进程所在机器的文件系统）。
+- 因此在 `remote` 模式下，它并不是浏览远端 OpenCode Server 文件系统，而是发送 AstrBot 本机文件。
+- 建议在 remote 模式下优先用纯文本任务；确需发文件时，先确认文件在 AstrBot 本机可访问且符合路径安全策略。
 
 #### remote 模式工作目录语义（重要）
 
@@ -177,7 +194,27 @@ OPENCODE_SERVER_PASSWORD=your-password opencode serve --hostname 127.0.0.1 --por
 
 使用 `/oc-history` 可查看最近使用的10个工作目录。
 
-## 用例模拟
+## 用例
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="./screenshots/image1.jpg" width="100%" />
+      <br/>
+      <strong></strong>
+    </td>
+    <td align="center">
+      <img src="./screenshots/image2.jpg" width="75%" />
+      <br/>
+      <strong></strong>
+    </td>
+    <td align="center">
+      <img src="./screenshots/image3.jpg" width="100%" />
+      <br/>
+      <strong></strong>
+    </td>
+  </tr>
+</table>
 
 下面的场景覆盖插件核心能力（本地/远程双模式、会话、安全、输出与运维命令）。
 
@@ -248,8 +285,17 @@ OPENCODE_SERVER_PASSWORD=your-password opencode serve --hostname 127.0.0.1 --por
 
 ### 9) 文件发送与路径安全（`/oc-send`）
 ```text
+用户: /oc-send
+机器人: 📄 列出当前工作区文件（分页，带阿拉伯数字序号）
+
+用户: /oc-send 1,3-5
+机器人: [按序号发送多个文件]
+
+用户: /oc-send src/config.yaml docs/readme.md
+机器人: [按相对路径发送多个文件]
+
 用户: /oc-send D:\Projects\config.yaml
-机器人: [发送文件 config.yaml]
+机器人: [按绝对路径发送文件（兼容旧用法）]
 
 用户: /oc-send C:\Windows\System32\cmd.exe
 机器人: ⚠️ 路径安全警告（若启用 check_path_safety）
