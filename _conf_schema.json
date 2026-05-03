@@ -1,0 +1,174 @@
+{
+    "basic_config": {
+        "description": "基础配置",
+        "type": "object",
+        "items": {
+            "only_admin": {
+                "description": "仅限管理员使用",
+                "type": "bool",
+                "default": true,
+                "hint": "开启后，只有 AstrBot 的管理员可以使用此插件功能"
+            },
+            "opencode_path": {
+                "description": "OpenCode 可执行路径",
+                "type": "string",
+                "default": "opencode",
+                "hint": "如果已添加到环境变量，保持默认即可；否则请输入完整路径"
+            },
+            "opencode_extra_args": {
+                "description": "OpenCode 参数（可选）",
+                "type": "string",
+                "default": "",
+                "hint": "可选OpenCode参数"
+            },
+            "connection_mode": {
+                "description": "连接模式",
+                "type": "string",
+                "options": ["local", "remote"],
+                "default": "local",
+                "hint": "local=本地 Shell 模式（AstrBot 与 OpenCode 在同机）；remote=服务器模式（连接远程 OpenCode Server）。"
+            },
+            "remote_server_url": {
+                "description": "远程 OpenCode Server 地址",
+                "type": "string",
+                "default": "",
+                "hint": "仅 remote 模式生效，例如 http://127.0.0.1:4096 或 https://your-server.com"
+            },
+            "remote_username": {
+                "description": "远程 Basic Auth 用户名",
+                "type": "string",
+                "default": "opencode",
+                "hint": "仅 remote 模式生效。若服务器未启用认证，可保持默认。"
+            },
+            "remote_password": {
+                "description": "远程 Basic Auth 密码",
+                "type": "string",
+                "default": "",
+                "obvious_hint": true,
+                "hint": "仅 remote 模式生效。若服务器配置了 OPENCODE_SERVER_PASSWORD，请填入对应密码。"
+            },
+            "remote_timeout": {
+                "description": "远程请求超时(秒)",
+                "type": "int",
+                "default": 300,
+                "hint": "仅 remote 模式生效。用于连接 OpenCode Server 的 HTTP 请求超时。"
+            },
+            "work_dir": {
+                "description": "默认工作目录",
+                "type": "string",
+                "default": "",
+                "hint": "OpenCode 启动时的默认目录。留空则默认为插件数据目录下的 workspace"
+            },
+            "proxy_url": {
+                "description": "代理地址",
+                "type": "string",
+                "default": "",
+                "hint": "OpenCode 运行时的网络代理，例如 http://127.0.0.1:7890 。留空则不使用代理。"
+            },
+            "destructive_keywords": {
+                "description": "敏感操作关键词(正则)",
+                "type": "list",
+                "default": ["删除", "格式化", "清空", "rm\\b", "delete\\b", "format\\b", "wipe\\b", "destroy\\b", "shutdown\\b", "reboot\\b", "mkfs", "dd\\b", "> /dev/"],
+                "hint": "当指令匹配到这些关键词时，会要求人工确认。支持正则表达式。"
+            },
+            "confirm_all_write_ops": {
+                "description": "写操作安全确认",
+                "type": "bool",
+                "default": true,
+                "hint": "开启后，任何包含「写」、「创建」、「修改」等关键词的操作都将要求人工批准。"
+            },
+            "check_path_safety": {
+                "description": "文件路径安全检查",
+                "type": "bool",
+                "default": false,
+                "hint": "开启后，限制 /oc-send 等命令只能访问当前工作目录、插件数据目录或历史目录中的文件。默认关闭（自由访问）。"
+            },
+            "auto_clean_interval": {
+                "description": "临时文件自动清理间隔(分钟)",
+                "type": "int",
+                "default": 60,
+                "hint": "每隔多少分钟自动清理 downloaded 和日志目录下的临时文件。设为 0 则不自动清理。"
+            },
+            "confirm_timeout": {
+                "description": "敏感操作确认超时(秒)",
+                "type": "int",
+                "default": 30,
+                "hint": "等待用户确认敏感操作的超时时间，默认 30 秒。"
+            }
+        }
+    },
+    "tool_config": {
+        "description": "LLM 函数工具配置",
+        "type": "object",
+        "items": {
+            "tool_description": {
+                "description": "Function Tool 描述",
+                "type": "text",
+                "default": "在用户电脑上调用 OpenCode 等 AI 智能体 Agent 的工具。当用户有执行编程、处理文档等复杂任务的高级需求时，调用此工具。",
+                "hint": "让大模型理解这个工具是干什么的，决定何时调用它。"
+            },
+            "arg_description": {
+                "description": "任务参数描述",
+                "type": "text",
+                "default": "详细的任务描述。保持原意，允许适当编辑以提升精准度，也可以不修改。此参数会被传送给 OpenCode 作为输入。",
+                "hint": "告诉大模型如何构造传入的 task_description 参数。"
+            }
+        }
+    },
+    "output_config": {
+        "description": "执行结果输出配置",
+        "type": "object",
+        "items": {
+            "output_modes": {
+                "description": "结果展示积木（多选）",
+                "type": "list",
+                "default": ["ai_summary", "txt_file", "long_image", "full_text"],
+                "options": [
+                    "last_line",
+                    "ai_summary",
+                    "full_text",
+                    "txt_file",
+                    "long_image"
+                ],
+                "hint": "选择输出方式组合。last_line: 仅最后一段(超长截断); ai_summary: AI摘要; full_text: 全量文本(自动切分); txt_file: TXT文件; long_image: 渲染为长图。是否按长文本阈值智能触发由下方 smart_trigger 开关决定。"
+            },
+            "merge_forward_enabled": {
+                "description": "启用合并转发发送",
+                "type": "bool",
+                "default": false,
+                "hint": "开启：按顺序合并发送所有命中的积木。关闭：按顺序逐条发送；full_text 将单独使用一次合并转发发送，避免刷屏。"
+            },
+            "summary_provider": {
+                "description": "AI 摘要服务提供商",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider",
+                "hint": "仅在勾选 'ai_summary' 时生效。选择生成摘要的大模型提供商。"
+            },
+            "max_text_length": {
+                "description": "长文本阈值(字符数)",
+                "type": "int",
+                "default": 1000,
+                "hint": "用于智能触发阈值。对应 smart_trigger 开启时，仅在输出超过此长度才展示对应积木；关闭 smart_trigger 时，只要勾选就总是展示。也用于 full_text 切分和 last_line 截断。"
+            },
+            "smart_trigger_ai_summary": {
+                "description": "ai_summary 智能触发",
+                "type": "bool",
+                "default": true,
+                "hint": "开启：仅在文本超过阈值时展示 ai_summary。关闭：只要勾选 ai_summary 就总是展示。"
+            },
+            "smart_trigger_txt_file": {
+                "description": "txt_file 智能触发",
+                "type": "bool",
+                "default": true,
+                "hint": "开启：仅在文本超过阈值时展示 txt_file。关闭：只要勾选 txt_file 就总是展示。"
+            },
+            "smart_trigger_long_image": {
+                "description": "long_image 智能触发",
+                "type": "bool",
+                "default": true,
+                "hint": "开启：仅在文本超过阈值时展示 long_image。关闭：只要勾选 long_image 就总是展示。"
+            }
+        }
+    }
+}
